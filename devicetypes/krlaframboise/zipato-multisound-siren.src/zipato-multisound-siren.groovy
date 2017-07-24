@@ -1,5 +1,5 @@
 /**
- *  Zipato Multisound Siren v1.5.6
+ *  Zipato Multisound Siren v1.6.1
  *     (Zipato Z-Wave Indoor Multi-Sound Siren -
  *        Model:PH-PSE02)
  *  
@@ -13,6 +13,13 @@
  *    Kevin LaFramboise (krlaframboise)
  *
  *  Changelog:
+ *
+ *  1.6.1 (07/23/2017)
+ *    	- Added legacy fingerprint support for security cc check.
+ *
+ *  1.6 (07/22/2017)
+ *    	- Fixed issue caused by the hub firmware update 000.018.00018
+ *    	- If you're on hub v1 or you installed the device prior to May 2016, make sure you test the device after updating to this version.
  *
  *  1.5.6 (04/23/2017)
  *    	- SmartThings broke parse method response handling so switched to sendhubaction.
@@ -282,14 +289,10 @@ def updated() {
 	
 		def cmds = []
 		if (!state.isConfigured) {
-			state.useSecureCmds = false
 			cmds += configure()			
 		}
 		else {
-			logDebug "Secure Commands ${state.useSecureCmds ? 'Enabled' : 'Disabled'}"
-			
 			cmds << alarmDurationSetCmd()
-			
 			cmds += refresh()
 		}		
 		return sendResponse(cmds)
@@ -362,8 +365,6 @@ def ping() {
 def configure() {
 	def cmds = []
 	
-	logDebug "Configuring ${state.useSecureCmds ? 'Secure' : 'Non-Secure'} Device"		
-	
 	cmds += delayBetween([
 		alarmDurationSetCmd(),
 		alarmDurationGetCmd(),
@@ -372,10 +373,6 @@ def configure() {
 		notificationTypeGetCmd(),
 		basicGetCmd()
 	], 500)
-	
-	if (!state.useSecureCmds) {
-		cmds << supportedSecurityGetCmd()
-	}
 	
 	return cmds
 }
@@ -607,14 +604,13 @@ private playSound(soundNumber) {
 def parse(String description) {	
 	def result = []
 	def cmd = zwave.parse(description, commandClassVersions)
-	
 	if (cmd) {
 		result += zwaveEvent(cmd)		
 	}
 	else {
-		logDebug "Unknown Description: $description"
-	}	
-	
+		log.warn "Unable to parse: $description"
+	}
+		
 	if (!isDuplicateCommand(state.lastCheckinTime, 60000)) {
 		result << createLastCheckinEvent()
 	}
@@ -650,15 +646,6 @@ private getCommandClassVersions() {
 		0x86: 1,  // Version (2)
 		0x98: 1   // Security
 	]
-}
-
-// Acknowledges secure commands and configures device using secure commands.
-def zwaveEvent(physicalgraph.zwave.commands.securityv1.SecurityCommandsSupportedReport cmd) {
-	state.useSecureCmds = true
-	logDebug "Secure Inclusion Detected"
-	def result = []
-	result += sendResponse(configure())
-	return result	
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
@@ -929,21 +916,13 @@ private configGetCmd(paramNumber) {
 	return secureCmd(zwave.configurationV1.configurationGet(parameterNumber: paramNumber))
 }
 
-private supportedSecurityGetCmd() {
-	logDebug "Checking for Secure Command Support"	
-	state.useSecureCmds = true // force secure cmd	
-	def cmd = secureCmd(zwave.securityV1.securityCommandsSupportedGet())	
-	state.useSecureCmds = false // reset secure cmd	
-	return cmd
-}
-
-private secureCmd(physicalgraph.zwave.Command cmd) {
-	if (state.useSecureCmds) {		
+private secureCmd(cmd) {
+	if (zwaveInfo?.zw?.contains("s") || ("0x98" in device.rawDescription?.split(" "))) {
 		return zwave.securityV1.securityMessageEncapsulation().encapsulate(cmd).format()
-	} 
-	else {		
-		return cmd.format()
 	}
+	else {
+		return cmd.format()
+	}	
 }
 
 private getCheckinIntervalSettingMinutes() {
