@@ -1,6 +1,6 @@
 /**
- *  Zooz Power Switch v0.0
- *  (Model: ZEN15)
+ *  Zooz Power Switch / Zooz Smart Plug v1.0
+ *  (Models: ZEN15, ZEN06)
  *
  *  Author: 
  *    Kevin LaFramboise (krlaframboise)
@@ -10,8 +10,8 @@
  *
  *  Changelog:
  *
- *    0.0 (07/25/2017)
- *      - Beta Release
+ *    1.0 (07/26/2017)
+ *      - Initial Release
  *
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -39,11 +39,25 @@ metadata {
 		capability "Voltage Measurement"
 		capability "Configuration"
 		capability "Refresh"
+		capability "Health Check"
 		
 		attribute "lastCheckin", "string"
+		attribute "history", "string"
 		attribute "current", "number"
+		attribute "energyTime", "number"
+		attribute "energyCost", "string"
+		attribute "energyDuration", "string"
+		
+		["power", "voltage", "current"].each {
+			attribute "${it}Low", "number"
+			attribute "${it}High", "number"
+		}
+				
+		command "reset"
 
-		fingerprint mfr:"027A", prod:"0101", model:"000D", deviceJoinName: "Zooz Power Switch"		
+		fingerprint mfr:"027A", prod:"0101", model:"000D", deviceJoinName: "Zooz Power Switch"
+		
+		fingerprint mfr:"027A", prod:"0101", model:"000A", deviceJoinName: "Zooz Smart Plug"
 	}
 
 	simulator { }
@@ -53,10 +67,17 @@ metadata {
 			getOptionsInput(it)
 		}
 		
-		input "debugOutput", "bool", 
-			title: "Enable debug logging?", 
-			defaultValue: true, 
-			required: false
+		input "energyPrice", "decimal",
+			title: "\$/kWh Cost:",
+			defaultValue: energyPriceSetting,
+			required: false,
+			displayDuringSetup: true
+			
+		["Power", "Energy", "Voltage", "Current"].each {
+			getBoolInput("display${it}", "Display ${it} Activity", true)
+		}
+
+		getBoolInput("debugOutput", "Enable Debug Logging", true)
 	}
 
 	tiles(scale: 2) {
@@ -67,22 +88,28 @@ metadata {
 			}
 		}
 		standardTile("refresh", "device.refresh", width: 2, height: 2) {
-			state "refresh", label:'Refresh', action: "refresh", icon:"st.secondary.refresh-icon", defaultState: true
+			state "refresh", label:'Refresh', action: "refresh", icon:"st.secondary.refresh-icon"
+		}
+		standardTile("reset", "device.reset", width: 2, height: 2) {
+			state "refresh", label:'Reset', action: "reset", icon:"st.secondary.refresh-icon"
 		}
 		valueTile("energy", "device.energy", width: 2, height: 2) {
-			state "val", label:'${currentValue} ${unit}', unit: "kWh", defaultState: true
+			state "energy", label:'${currentValue} kWh', backgroundColor: "#cccccc"
 		}
 		valueTile("power", "device.power", width: 2, height: 2) {
-			state "val", label:'${currentValue} ${unit}', unit: "W", defaultState: true
+			state "power", label:'${currentValue} W', backgroundColor: "#cccccc"
 		}
 		valueTile("voltage", "device.voltage", width: 2, height: 2) {
-			state "val", label:'${currentValue} ${unit}', unit: "V", defaultState: true
+			state "voltage", label:'${currentValue} V', backgroundColor: "#cccccc"
 		}
 		valueTile("current", "device.current", width: 2, height: 2) {
-			state "val", label:'${currentValue} ${unit}', unit: "A", defaultState: true
+			state "current", label:'${currentValue} A', backgroundColor: "#cccccc"
+		}
+		standardTile("history", "device.history", decoration:"flat",width: 6, height: 3) {
+			state "history", label:'${currentValue}'
 		}
 		main "switch"
-		details(["switch", "overload", "refresh", "energy", "power", "voltage", "current"])
+		details(["switch", "power", "energy", "refresh", "voltage", "current", "reset", "history"])
 	}
 }
 
@@ -97,6 +124,14 @@ private getOptionsInput(param) {
 	}
 }
 
+private getBoolInput(name, title, defaultVal) {
+	input "${name}", "bool", 
+		title: "${title}?", 
+		defaultValue: defaultVal, 
+		required: false
+}
+
+
 def updated() {	
 	if (!isDuplicateCommand(state.lastUpdated, 3000)) {
 		state.lastUpdated = new Date().time
@@ -107,29 +142,23 @@ def updated() {
 }
 
 def configure() {
-	def cmds = []
+	def result = []
 	
+	updateHealthCheckInterval()
+		
+	def cmds = []	
 	configParams.each { param ->	
 		cmds += updateConfigVal(param)
 	}
-
-	if (!getAttrValue("switch")) {
-		cmds << switchBinaryGetCmd()
-	}
-	if (!getAttrValue("power")) {
-		cmds << meterGetCmd(meterScalePower)
-	}
-	if (!getAttrValue("energy")) {
-		cmds << meterGetCmd(meterScaleEnergy)
-	}
-	if (!getAttrValue("voltage")) {
-		cmds << meterGetCmd(meterScaleVoltage)
-	}
-	if (!getAttrValue("current")) {
-		cmds << meterGetCmd(meterScaleCurrent)
-	}
+	result += delayBetweenCmds(cmds)
 	
-	return delayBetweenCmds(cmds)
+	if (!getAttrVal("energyTime")) {
+		result += reset()
+	}
+	else {
+		result += refresh()	
+	}	
+	return result
 }
 
 private updateConfigVal(param) {
@@ -145,6 +174,27 @@ private updateConfigVal(param) {
 
 private hasPendingChange(param) {
 	return (getParamIntVal(param) != getParamStoredIntVal(param))
+}
+
+void updateHealthCheckInterval() {
+	def minReportingInterval = minimumReportingInterval
+	
+	if (state.minReportingInterval != minReportingInterval) {
+		state.minReportingInterval = minReportingInterval
+			
+		// Set the Health Check interval so that it can be skipped twice plus 5 minutes.
+		def checkInterval = ((minReportingInterval * 2) + (5 * 60))
+		
+		def eventMap = createEventMap("checkInterval", checkInterval, false)
+		eventMap.data = [protocol: "zwave", hubHardwareId: device.hub.hardwareID]
+		
+		sendEvent(eventMap)
+	}
+}
+
+def ping() {
+	logDebug "Pinging device because it has not checked in"
+	return [switchBinaryGetCmd()]
 }
 
 
@@ -168,16 +218,30 @@ def refresh() {
 	logTrace "Refreshing"
 	return delayBetweenCmds([
 		switchBinaryGetCmd(),
-		meterGetCmd(meterScaleEnergy),
-		meterGetCmd(meterScalePower),
-		meterGetCmd(meterScaleVoltage),
-		meterGetCmd(meterScaleCurrent)
+		meterGetCmd(meterEnergy),
+		meterGetCmd(meterPower),
+		meterGetCmd(meterVoltage),
+		meterGetCmd(meterCurrent)
 	])
 }
 
+def reset() {
+	logTrace "Resetting"
+	["power", "voltage", "current"].each {
+		sendEvent(createEventMap("${it}Low", getAttrVal(it), false))
+		sendEvent(createEventMap("${it}High", getAttrVal(it), false))
+	}
+	sendEvent(createEventMap("energyTime", new Date().time, false))
+	
+	def result = []
+	result << meterResetCmd()
+	result += refresh()
+	return result
+}
 
-private meterGetCmd(scale) {
-	return secureCmd(zwave.meterV3.meterGet(scale: scale))
+
+private meterGetCmd(meter) {
+	return secureCmd(zwave.meterV3.meterGet(scale: meter.scale))
 }
 
 private meterResetCmd() {
@@ -209,7 +273,7 @@ private secureCmd(cmd) {
 	}	
 }
 
-private delayBetweenCmds(cmds, delay=50) {
+private delayBetweenCmds(cmds, delay=500) {
 	return cmds ? delayBetween(cmds, delay) : []
 }
 
@@ -287,64 +351,157 @@ def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport 
 def zwaveEvent(physicalgraph.zwave.commands.switchbinaryv1.SwitchBinaryReport cmd) {
 	logTrace "SwitchBinaryReport: ${cmd}"
 	def result = []
-	result << createSwitchEvent(cmd.value, false)
+	result << createSwitchEvent(cmd.value, "digital")
 	return result
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicReport cmd) {
 	logTrace "BasicReport: ${cmd}"
 	def result = []
-	result << createSwitchEvent(cmd.value, true)
+	result << createSwitchEvent(cmd.value, "physical")
 	return result
 }
 
-private createSwitchEvent(value, physical) {
+private createSwitchEvent(value, type) {
 	def eventVal = (value == 0xFF) ? "on" : "off"
-	def map = createEventMap("switch", eventVal, true, "Switch is ${eventVal}")
-	map.physical = physical
+	def map = createEventMap("switch", eventVal, null, "Switch is ${eventVal}")
+	map.type = type
 	return createEvent(map)
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.meterv3.MeterReport cmd) {
-	// logTrace "MeterReport: $cmd"
+	logTrace "MeterReport: $cmd"
 	def result = []	
-	def name
-	def unit 
-	def val = cmd.scaledMeterValue
-	
+	def val = roundTwoPlaces(cmd.scaledMeterValue)
+		
+	def meter 
 	switch (cmd.scale) {
-		case meterScaleEnergy:
-			name = "energy"
-			unit = "kWh"
+		case meterEnergy.scale:
+			meter = meterEnergy
 			break
-		case meterScalePower:
-			name = "power"
-			unit = "W"
+		case meterPower.scale:
+			meter = meterPower
 			break
-		case meterScaleVoltage:
-			name = "voltage"
-			unit = "V"
+		case meterVoltage.scale:
+			meter = meterVoltage
 			break
-		case meterScaleCurrent:
-			name = "current"
-			unit = "A"
+		case meterCurrent.scale:
+			meter = meterCurrent
 			break
 		default:
 			logDebug "Unknown Meter Scale: $cmd"
 	}
 	
-	if (name && getAttrValue("$name") != val) {
-		result << createEvent(createEventMap(name, val, null, "${name} is ${val} ${unit}", unit))
+	if (meter?.name && getAttrVal("${meter.name}") != val) {
+		result << createEvent(createEventMap(meter.name, val, meter.displayed, null, meter.unit))
+		
+		if (meter.name == meterEnergy.name) {
+			result += createEnergyEvents(val)
+		}
+		else {
+			result += createHighLowEvents(meter, val)
+		}
+		
+		runIn(5, refreshHistory)
 	}
 	return result
 }
 
-// Meter Scales
-private getMeterScaleEnergy() { return 0 }
-private getMeterScalePower() { return 2 }
-private getMeterScaleVoltage() { return 4 }
-private getMeterScaleCurrent() { return 5 }
+private createHighLowEvents(meter, val) {
+	def result = []
+	def highLowNames = [] 
+	def highName = "${meter.name}High"
+	def lowName = "${meter.name}Low"
+	if (!getAttrVal(highName) || val > getAttrVal(highName)) {
+		highLowNames << highName
+	}
+	if (!getAttrVal(lowName) || meter.value < getAttrVal(lowName)) {
+		highLowNames << lowName
+	}
+	
+	highLowNames.each {
+		result << createEvent(createEventMap("$it", val, false, null, meter.unit))
+	}
+	return result
+}
 
+private createEnergyEvents(val) {
+	def result = []
+	
+	def cost = "\$${roundTwoPlaces(val * energyPriceSetting)}"
+	if (getAttrVal("energyCost") != cost) {
+		result << createEvent(createEventMap("energyCost", cost, false))
+	}
+	
+	result << createEvent(createEventMap("energyDuration", calculateEnergyDuration(), false))	
+	return result
+}
+
+private calculateEnergyDuration() {
+	def energyTimeMS = getAttrVal("energyTime")
+	if (!energyTimeMS) {
+		return "Unknown"
+	}
+	else {
+		def duration = roundTwoPlaces((new Date().time - energyTimeMS) / 60000)
+		
+		if (duration >= (24 * 60)) {
+			return getFormattedDuration(duration, (24 * 60), "Day")
+		}
+		else if (duration >= 60) {
+			return getFormattedDuration(duration, 60, "Hour")
+		}
+		else {
+			return getFormattedDuration(duration, 0, "Minute")
+		}
+	}
+}
+
+private getFormattedDuration(duration, divisor, name) {
+	if (divisor) {
+		duration = roundTwoPlaces(duration / divisor)
+	}	
+	return "${duration} ${name}${duration == 1 ? '' : 's'}"
+}
+
+def refreshHistory() {
+	def history = ""
+	def items = [:]
+	items["energyDuration"] = "Energy - Duration"
+	items["energyCost"] = "Energy - Cost"
+	["power", "voltage", "current"].each {
+		items["${it}Low"] = "${it.capitalize()} - Low"
+		items["${it}High"] = "${it.capitalize()} - High"
+	}
+	items.each { attrName, caption ->
+		def attr = device.currentState("${attrName}")
+		def val = attr?.value ?: ""
+		def unit = attr?.unit ?: ""
+		history += "${caption}: ${val} ${unit}\n"
+	}
+	sendEvent(createEventMap("history", history, false))
+}
+
+// Meters
+private getMeterEnergy() { 
+	return getMeterMap("energy", 0, "kWh", settings?.displayEnergy != false) 
+}
+
+private getMeterPower() { 
+	return getMeterMap("power", 2, "W", settings?.displayPower != false)
+}
+
+private getMeterVoltage() { 
+	return getMeterMap("voltage", 4, "V", settings?.displayVoltage != false) 
+}
+
+private getMeterCurrent() { 
+	return getMeterMap("current", 5, "A", settings?.displayCurrent != false)
+}
+
+private getMeterMap(name, scale, unit, displayed) {
+	return [name:name, scale:scale, unit:unit, displayed:displayed]
+}
 
 def zwaveEvent(physicalgraph.zwave.Command cmd) {
 	logDebug "Unhandled zwaveEvent: $cmd"
@@ -389,23 +546,23 @@ private getPowerValueChangeParam() {
 }
 
 private getPowerPercentageChangeParam() {
-	return createConfigParamMap(152, "Power Report Percentage Change", 1, getPercentageOptions(10, [zeroName: "No Reports"]), "powerPercentageChange")
+	return createConfigParamMap(152, "Power Report Percentage Change", 1, getPercentageOptions(10, "No Reports"), "powerPercentageChange")
 }
 
 private getPowerReportIntervalParam() {
-	return createConfigParamMap(171, "Power Reporting Interval", 4, getIntervalOptions(30, [zeroName:"No Reports"]), "powerReportingInterval")
+	return createConfigParamMap(171, "Power Reporting Interval", 4, getIntervalOptions(30, "No Reports"), "powerReportingInterval")
 }
 
 private getEnergyReportIntervalParam() {
-	return createConfigParamMap(172, "Energy Reporting Interval", 4, getIntervalOptions(300, [zeroName:"No Reports"]), "energyReportingInterval")	
+	return createConfigParamMap(172, "Energy Reporting Interval", 4, getIntervalOptions(300, "No Reports"), "energyReportingInterval")	
 }
 
 private getVoltageReportIntervalParam() {
-	return createConfigParamMap(173, "Voltage Reporting Interval", 4, getIntervalOptions(0, [zeroName:"No Reports"]), "voltageReportingInterval")	
+	return createConfigParamMap(173, "Voltage Reporting Interval", 4, getIntervalOptions(0, "No Reports"), "voltageReportingInterval")	
 }
 
 private getElectricityReportIntervalParam() {
-	return createConfigParamMap(174, "Electrical Current Reporting Interval", 4, getIntervalOptions(0, [zeroName:"No Reports"]), "electricityReportingInterval")	
+	return createConfigParamMap(174, "Electrical Current Reporting Interval", 4, getIntervalOptions(0, "No Reports"), "electricityReportingInterval")	
 }
 
 private getParamStoredIntVal(param) {
@@ -430,57 +587,45 @@ private createConfigParamMap(num, name, size, options, prefName, val=null) {
 	]
 }
 
-
 // Settings
+private getEnergyPriceSetting() {
+	return safeToDec(settings?.energyPrice, 0.12)
+}
+
 private getDebugOutputSetting() {
 	return settings?.debugOutput != false
 }
 
+private getMinimumReportingInterval() {
+	def minVal = (60 * 60 * 24 * 7)
+	[powerReportIntervalParam, energyReportIntervalParam, voltageReportIntervalParam, electricityReportIntervalParam].each {
+		def val = convertOptionSettingToInt(it.options, it.val)
+		if (val && val < minVal) {
+			minVal = val
+		}		
+	}
+	return minVal
+}
 
-private getIntervalOptions(defaultVal=null, data=[:]) {
+private getIntervalOptions(defaultVal=null, zeroName=null) {
 	def options = [:]
-	def min = data?.zeroName ? 0 : (data?.min != null ? data.min : 1)
-	def max = data?.max != null ? data?.max : (9 * 60 * 60)
-	
-	[0,5,10,15,30,45].each {
-		if (withinRange(it, min, max)) {
-			if (it == 0 && data?.zeroName != null) {
-				options["${data?.zeroName}"] = it
-			}
-			else {
-				options["${it} Second${x == 1 ? '' : 's'}"] = it
-			}
-		}
+	if (zeroName) {
+		options["${zeroName}"] = 0
 	}
-
-	[1,2,3,4,5,10,15,30,45].each {
-		def val = (it * 60)
-		if (withinRange(val, min, max)) {
-			options["${it} Minute${x == 1 ? '' : 's'}"] = val
-		}
-	}
-
-	[1,2,3,6,9,12,18].each {
-		def val = (it * 60 * 60)
-		if (withinRange(val, min, max)) {
-			options["${it} Hour${x == 1 ? '' : 's'}"] = val
-		}
-	}	
-	
-	[1,3,5].each {
-		def val = (it * 60 * 60 * 24)
-		if (withinRange(val, min, max)) {
-			options["${it} Day${x == 1 ? '' : 's'}"] = val
-		}
-	}
-	
-	[1,2].each {
-		def val = (it * 60 * 60 * 24 * 7)
-		if (withinRange(val, min, max)) {
-			options["${it} Week${x == 1 ? '' : 's'}"] = val
-		}
-	}	
+	options << getIntervalOptionsRange("Second", 1, [5,10,15,30,45])
+	options << getIntervalOptionsRange("Minute", 60, [1,2,3,4,5,10,15,30,45])
+	options << getIntervalOptionsRange("Hour", (60 * 60), [1,2,3,6,9,12,18])
+	options << getIntervalOptionsRange("Day", (60 * 60 * 24), [1,3,5])
+	options << getIntervalOptionsRange("Week", (60 * 60 * 24 * 7), [1,2])
 	return setDefaultOption(options, defaultVal)
+}
+
+private getIntervalOptionsRange(name, multiplier, range) {
+	def options = [:]
+	range?.each {
+		options["${it} ${name}${it == 1 ? '' : 's'}"] = (it * multiplier)
+	}
+	return options
 }
 
 private getPowerValueOptions() {
@@ -496,33 +641,18 @@ private getPowerValueOptions() {
 	return setDefaultOption(options, 50)
 }
 
-private getPercentageOptions(defaultVal=null, data=[:]) {
+private getPercentageOptions(defaultVal=null, zeroName=null) {
 	def options = [:]
-	def min = data?.zeroName ? 0 : (data?.min != null ? data.min : 1)
-	def max = data?.max != null ? data?.max : 100
-		
-	[0,1,2,3,4,5].each {
-		if (withinRange(it, min, max)) {
-			if (it == 0 && data?.zeroName != null) {
-				options["${data?.zeroName}"] = it
-			}
-			else {
-				options["${it}%"] = it
-			}
-		}
-	}
-	
+	if (zeroName) {
+		options["${zeroName}"] = 0
+	}	
+	for (int i = 1; i <= 5; i += 1) {
+		options["${i}%"] = i
+	}		
 	for (int i = 10; i <= 100; i += 5) {
-		if (withinRange(i, min, max)) {
-			options["${i}%"] = i
-		}
-	}
-	
+		options["${i}%"] = i
+	}	
 	return setDefaultOption(options, defaultVal)
-}
-
-private withinRange(val, min, max) {
-	return ((min == null || val >= min) && (max == null || val <= max))
 }
 
 private convertOptionSettingToInt(options, settingVal) {
@@ -562,18 +692,16 @@ private getDefaultOptionSuffix() {
 }
 
 private createEventMap(name, value, displayed=null, desc=null, unit=null) {	
-	def newVal = "${value}"	
-	displayed = (displayed == null ? (getAttrValue(name) != newVal) : displayed)
 	def eventMap = [
 		name: name,
 		value: value,
-		displayed: displayed,
+		displayed: (displayed == null ? ("${getAttrVal(name)}" != "${value}") : displayed),
 		isStateChange: true
 	]
 	if (unit) {
 		eventMap.unit = unit
 	}
-	if (desc) {
+	if (desc && eventMap.displayed) {
 		logDebug desc
 		eventMap.descriptionText = "${device.displayName} - ${desc}"
 	}
@@ -583,7 +711,7 @@ private createEventMap(name, value, displayed=null, desc=null, unit=null) {
 	return eventMap
 }
 
-private getAttrValue(attrName) {
+private getAttrVal(attrName) {
 	try {
 		return device?.currentValue("${attrName}")
 	}
