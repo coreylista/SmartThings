@@ -1,13 +1,13 @@
 /**
- *  Other Hub Device Viewer v0.0 (ALPHA)
+ *  SmartThings: Other Hub Device Viewer v0.1 (BETA)
  *
  *  Author: 
  *    Kevin LaFramboise (krlaframboise)
  *
  *  Changelog:
  *
- *    0.0 (09/02/2017)
- *			- Alpha Relase
+ *    0.1 (09/05/2017)
+ *			- Beta Relase
  *
  *  Licensed under the Apache License, Version 2.0 (the
  *  "License"); you may not use this file except in
@@ -39,11 +39,9 @@ definition(
 	page(name:"lastEventPage")
 	page(name:"refreshLastEventPage")
 	page(name:"toggleSwitchPage")
-	// page(name:"devicesPage")
 	page(name:"displaySettingsPage")
 	page(name:"thresholdsPage")
 	page(name:"notificationsPage")
-	page(name:"pollingPage")
 	page(name:"otherSettingsPage")
 	page(name:"dashboardSettingsPage")
 	page(name:"enableDashboardPage")
@@ -53,14 +51,15 @@ definition(
 // Main Menu Page
 def mainPage() {	
 	dynamicPage(name:"mainPage", uninstall:true, install:true) {
-		if (settings?.hubBridge) {
-			if (getAllDevices().size() != 0) {				
+		if (settings?.ohDevices) {
+			def devices = getAllDevices()
+			if (devices?.size() != 0) {				
 				section() {
 					getDashboardHref()
 				}
 			}
 			section() {
-				if (getAllDevices().size() != 0) {				
+				if (devices?.size() != 0) {				
 					state.lastCapabilitySetting = null
 					getPageLink("lastEventLink",
 						"All Devices - Last Event",
@@ -71,10 +70,14 @@ def mainPage() {
 			}
 		}
 		section("Settings") {			
-			input "hubBridge", "capability.sensor",
+			input "hubBridge", "capability.bridge",
 				title: "Other Hub Bridge?",
 				required: true
-			if (settings?.hubBridge) {
+			input "ohDevices", "capability.bridge",
+				title: "Choose Other Hub Devices",
+				multiple: true,
+				required: false
+			if (settings?.ohDevices) {
 				getPageLink("displaySettingsLink",
 					"Display Settings",
 					"displaySettingsPage")
@@ -84,9 +87,6 @@ def mainPage() {
 				getPageLink("notificationsLink",
 					"Notification Settings",
 					"notificationsPage")
-				getPageLink("pollingLink",
-					"Polling Settings",
-					"pollingPage")
 				getPageLink("otherSettingsLink",
 					"Other Settings",
 					"otherSettingsPage")
@@ -325,32 +325,6 @@ def notificationsPage() {
 	}
 }
 
-// Page for Polling settings
-def pollingPage() {
-	dynamicPage(name:"pollingPage") {
-		section ("Polling Settings") {
-			paragraph "If you enable the polling feature, the devices that support the Polling Capability will be polled at a regular interval."
-			paragraph "Polling your devices too frequently can cause them to stop responding or miss other commands that get sent to it."
-			input "pollingEnabled", "bool",
-				title: "Polling Enabled",
-				defaultValue: false,
-				required: false
-			input "pollingInterval", "number",
-				title: "How often should the devices be polled? (minutes)\n(Must be between 5 and ${6 * 24 * 60})",
-				defaultValue: (4 * 60),
-				range: "5..${6 * 24 * 60}",
-				required: false
-		}
-		section("Polling Restrictions") {
-			input "pollingExcluded", "enum",
-				title: "Exclude these devices from Polling",
-				multiple: true,
-				required: false,
-				options: getExcludedDeviceOptions("Polling")
-		}
-	}
-}
-
 private getExcludedDeviceOptions(capabilityName) {
 	if (capabilityName) {
 		getDevicesByCapability(capabilityName).collect { it.displayName }?.sort()
@@ -504,15 +478,7 @@ private enableDashboardPage() {
 // Lists all devices and their last event times.
 def lastEventPage() {
 	dynamicPage(name:"lastEventPage") {		
-		section ("Time Since Last Event") {
-			href(
-				name: "refreshLastEventLink", 
-				title: "Refresh Data",
-				description: "${getRefreshLastEventLinkDescription()}",
-				page: "refreshLastEventPage",
-				required: false
-			)
-			
+		section ("Time Since Last Event") {			
 			def items = getAllDeviceLastEventListItems()?.unique()
 			if (settings.lastEventSortByValue != false) {
 				items?.each { it.sortValue = (it.sortValue * -1) }
@@ -543,8 +509,8 @@ def toggleSwitchPage(params) {
 		section () {
 			paragraph "Wait a few seconds before pressing Done to ensure that the previous page refreshes correctly."
 			if (params.deviceId) {
-				def device = params.deviceId ? getAllDevices().find { it.id == params.deviceId } : null
-				def newState = device?.currentSwitch == "off" ? "on" : "off"
+				def device = params.deviceId ? getAllDevices().find { "${it.id}" == "${params.deviceId}" } : null
+				def newState = "${device?.attrs?.switch}" == "off" ? "on" : "off"
 				paragraph toggleSwitch(device, newState)
 			}
 			else {
@@ -557,14 +523,18 @@ def toggleSwitchPage(params) {
 }
 
 private toggleSwitch(device, newState) {
-	if (device) {	
-		if (newState == "on") {
-			device.on()
+	def hubBridge = settings?.hubBridge
+	if (device && hubBridge?.hasCommand("childOn")) {
+		if ("${newState}" == "on") {
+			hubBridge.childOn(device.id)
 		}
 		else {
-			device.off()
+			hubBridge.childOff(device.id)			
 		}		
 		return "Turned ${device.displayName} ${newState.toUpperCase()}"
+	}
+	else if (!hubBridge.hasCommand("childOn")) {
+		log.warn "The selected Hub Bridge is not a Other Hub Bride"
 	}
 }
 
@@ -577,16 +547,9 @@ def capabilityPage(params) {
 			state.lastCapabilitySetting = capSetting
 			section("${getPluralName(capSetting)}") {
 				if (capSetting.name in ["Switch","Light"]) {
-					// href(
-						// name: "allOffSwitchLink", 
-						// title: "Turn Off All ${getPluralName(capSetting)}",
-						// description: "",
-						// page: "toggleSwitchPage",
-						// required: false
-					// )
 					getSwitchToggleLinks(getDeviceCapabilityListItems(capSetting))
 				}
-				else {				
+				else {
 					getParagraphs(getDeviceCapabilityListItems(capSetting))
 				}
 			}
@@ -634,7 +597,7 @@ private getSwitchToggleLinks(listItems) {
 			description: "",
 			page: "toggleSwitchPage", 
 			required: false,
-			params: [deviceId: it.deviceId]
+			params: [deviceId: "${it.deviceId}"]
 		)
 	}
 }
@@ -694,7 +657,7 @@ private getDeviceAllCapabilitiesListItem(selectedCapSettings, device) {
 }
 
 private hasCapability(device, capabilityName) {
-	return device?.capabilities?.find { it == capabilityName } ? true : false
+	return device?.caps?.find { "${it}" == "${capabilityName}" } ? true : false
 }
 
 private getDeviceCapabilityListItems(cap) {
@@ -755,7 +718,7 @@ private getDeviceLastEventListItem(device) {
 	def listItem = [
 		value: lastEventTime ? now - lastEventTime : Long.MAX_VALUE,
 		status: lastEventTime ? "${getTimeSinceLastActivity(now - lastEventTime)}" : "N/A",
-		deviceId: device.deviceNetworkId
+		deviceId: device.id
 	]
 	
 	listItem.title = getDeviceStatusTitle(device, listItem.status)
@@ -809,9 +772,7 @@ private getOnlineOfflineStatus(deviceStatus) {
 
 private getDeviceCapabilityStatusItem(device, cap) {
 	try {
-		// def attrName = getAttributeName(cap)
-		// log.info "$attrName"
-		return getCapabilityStatusItem(cap, device.displayName, "${device.currentValues[getAttributeName(cap)]}")
+		return getCapabilityStatusItem(cap, device.displayName, "${device.attrs[getAttributeName(cap)]}")
 	}
 	catch (e) {
 		log.error "Device: ${device?.displayName} - Capability: $cap - Error: $e"
@@ -914,27 +875,20 @@ private getSelectedCapabilitySettings(timeout) {
 }
 
 private getAllDNIs() {
-	return getAllDevices().collect { it.deviceNetworkId }
+	return getAllDevices().collect { it.id }
 }
 
-private getAllDevices() {
-	def result = []
-	if (!isDuplicateCommand(state.lastGetAllDevices, 15000)) {
-		state.lastGetAllDevices = new Date().time
-		state.allDevices = extractDevices() ?: []	
-	}
-	return state.allDevices
-}
-
-private extractDevices() {
-	// log.trace "extractDevices()"
+private getAllDevices() {	
 	def devices = []
 	try {
-		def data = settings?.hubBridge?.currentValue("deviceList")
-		if (data) {
-			def slurper = new groovy.json.JsonSlurper()
-			devices = slurper.parseText(data)		
-		}		
+		def slurper = new groovy.json.JsonSlurper()
+		settings?.ohDevices?.each {
+			if (it.hasAttribute("otherHubData") && it.currentOtherHubData) {
+				def device = slurper.parseText(it.currentOtherHubData)
+				device?.id = it.currentDeviceId
+				devices << device
+			}
+		}
 	}
 	catch (e) {
 		log.error "$e"
@@ -943,7 +897,12 @@ private extractDevices() {
 }
 
 private Date getLastActivityDate(device) {
-	return Date.parse("yyyy-MM-dd'T'HH:mm:ss", "${device.lastActivity}".replace("+00:00", ""))
+	if (device?.activity) {
+		return Date.parse("yyyy-MM-dd'T'HH:mm:ss", "${device.activity}".replace("+00:00", ""))		
+	}
+	else {
+		return new Date((new Date().time - (90 * 24 * 60 * 60)))
+	}
 }
 
 private isDuplicateCommand(lastExecuted, allowedMil) {
@@ -1113,10 +1072,6 @@ def updated() {
 	unschedule()
 	state.refreshingDashboard = false
 	
-	if (state.capabilitySettings) {
-		cleanState()
-	}
-	
 	initialize()
 	
 	logDebug "State Used: ${(state.toString().length() / 100000)*100}%"
@@ -1131,16 +1086,6 @@ private initialize() {
 	runIn(2, performScheduledTasks)
 	
 	initializeDevicesCache()
-}
-
-// Starting with version 1.9, the capabilitySettings are
-// no longer stored in state so this cleans up the old data.
-private cleanState() {
-	def sentNotifications = state.sentNotifications
-	def devicesCache = state.devicesCache
-	state.clear()
-	state.sentNotifications = sentNotifications
-	state.devicesCache = devicesCache
 }
 
 // Remove cached data for devices no longer selected and
@@ -1158,24 +1103,9 @@ def performScheduledTasks() {
 	if (canCheckDevices(state.lastDeviceCheck)) {
 		checkDevices()		
 	}
-	if (canPollDevices(state.lastDevicePoll)) {
-		runIn(61, refreshDeviceActivityCache)
-		pollDevices()
-	}
 	else {
 		refreshDeviceActivityCache()
 	}
-}
-
-void pollDevices() {
-	logDebug "Polling Devices"
-	state.lastDevicePoll = new Date().time	
-	getDevicesByCapability("Polling", pollingExcluded)*.poll()
-}
-
-private canPollDevices(lastPoll) {
-	return settings.pollingEnabled &&
-		timeElapsed((lastPoll ?: 0) + msMinute(safeToInteger(settings.pollingInterval, 5)), true)
 }
 
 void refreshDeviceActivityCache() {
@@ -1200,7 +1130,7 @@ void refreshDeviceActivityCache() {
 		
 			if (lastActivity) {
 				lastActivity.cachedTime = cachedTime
-				getDeviceCache(device.deviceNetworkId).activity = lastActivity
+				getDeviceCache(device.id).activity = lastActivity
 			}
 			
 		}	
@@ -1614,15 +1544,15 @@ private capabilitySettings() {
 			attributeName: "illuminance",
 			units: " lx"
 		],
-		[
-			name: "Light",
-			prefName: "light",
-			prefType: "switch",
-			capabilityName: "Switch",
-			attributeName: "switch",
-			activeState: "on",		
-			imageOnly: true
-		],
+		// [
+			// name: "Light",
+			// prefName: "light",
+			// prefType: "switch",
+			// capabilityName: "Switch",
+			// attributeName: "switch",
+			// activeState: "on",		
+			// imageOnly: true
+		// ],
 		[
 			name: "Lock",
 			activeState: "locked",
@@ -1662,12 +1592,12 @@ private capabilitySettings() {
 			activeState: "detected",
 			imageOnly: true
 		],
-		// [
-			// name: "Switch",
-			// pluralName: "Switches",		
-			// activeState: "on",
-			// imageOnly: true
-		// ],		
+		[
+			name: "Switch",
+			pluralName: "Switches",		
+			activeState: "on",
+			imageOnly: true
+		],		
 		[
 			name: "Temperature Measurement",
 			pluralName: "Temperature Sensors",
@@ -1712,10 +1642,17 @@ private initializeAppEndpoint() {
 }
 
 mappings {
+	path("/event/:name/:value/:deviceId") {action: [GET: "api_event"]}
 	path("/dashboard") {action: [GET: "api_dashboard"]}
 	path("/dashboard/:capability") {action: [GET: "api_dashboard"]}	
 	path("/dashboard/:capability/:cmd") {action: [GET: "api_dashboard"]}
 	path("/dashboard/:capability/:cmd/:deviceId") {action: [GET: "api_dashboard"]}	
+}
+
+private api_event() {
+	logDebug "Device ${params?.deviceId} ${params?.name} is ${params?.value}"
+	settings?.hubBridge?.childEvent("${params?.deviceId}", "${params?.name}", params.value)
+	return []
 }
 
 private api_dashboardUrl(capName=null) {	
@@ -1778,7 +1715,7 @@ def api_dashboard() {
 		
 		if (params.capability == "events") {
 			def items = getAllDeviceLastEventListItems()?.unique()
-			if (settings.lastEventSortByValue != false) {
+			if (settings?.lastEventSortByValue != false) {
 				items?.each { it.sortValue = (it.sortValue * -1) }
 			}
 			html = api_getItemsHtml(items)
@@ -1815,7 +1752,7 @@ private api_getCapabilityHtml(cap, currentUrl, deviceId, cmd) {
 			html = "<h1>${api_toggleSwitch(cap, deviceId, cmd)}</h1>"
 		}
 		else {
-			html = api_toggleSwitches(cap, cmd)
+			html = api_toggleSwitches (cap, cmd)
 		}
 	
 		html = "<div class=\"command-results\">$html</div>"		
@@ -1870,7 +1807,7 @@ private api_toggleSwitches(cap, cmd) {
 }
 
 private api_toggleSwitch(cap, deviceId, cmd) {
-	def device = deviceId ? getAllDevices().find { it.id == deviceId } : null
+	def device = deviceId ? getAllDevices().find { "${it.id}" == "${deviceId}" } : null
 		
 	if (device) {
 		def newState = api_getNewSwitchState(device, cmd)
@@ -1891,7 +1828,7 @@ private api_getNewSwitchState(device, cmd) {
 		return cmd
 	}
 	else if (cmd == "toggle") {
-		return device?.currentSwitch == "off" ? "on" : "off"
+		return device?.attrs?."switch" == "off" ? "on" : "off"
 	}
 	else {
 		return ""
@@ -1901,7 +1838,7 @@ private api_getNewSwitchState(device, cmd) {
 private api_getToggleItemsHtml(currentUrl, listItems) {
 	def html = ""
 			
-	listItems.unique().each {		
+	listItems.unique().each {	
 		html += api_getItemHtml(it.title, it.image, "${currentUrl}/toggle/${it.deviceId}", it.deviceId, it.status)
 	}
 	
@@ -1913,20 +1850,15 @@ private api_getToggleItemsHtml(currentUrl, listItems) {
 		imageName = imageName?.replace("-on", "")?.replace("-off", "")
 	}	
 	
-	// if (imageName in ["light", "switch"]) {
-		// html += api_getItemHtml("Turn All Off", "${imageName}-off all-command", "${currentUrl}/off", "", "")	
-		
-		// html += api_getItemHtml("Turn All On", "${imageName}-on all-command", "${currentUrl}/on", "", "")
-	// }
 	return html
 }
 
 private api_getItemsHtml(listItems) {
 	def html = ""		
 	
-	listItems.sort { it.sortValue }
+	listItems?.sort { it.sortValue }
 	
-	listItems.unique().each {				
+	listItems?.unique().each {				
 		html += api_getItemHtml(it.title, it.image, null, it.deviceId, it.status)
 	}
 	return html
@@ -1934,7 +1866,7 @@ private api_getItemsHtml(listItems) {
 
 private api_getItemHtml(text, imageName, url, deviceId, status) {
 	def imageClass = imageName ? imageName?.replace(".png", "") : ""
-	def deviceClass = deviceId ? deviceId?.replace(" ", "-") : "none"
+	def deviceClass = deviceId ? "$deviceId"?.replace(" ", "-") : "none"
 	def html 
 	
 	if (url) {
@@ -1993,7 +1925,7 @@ private api_getJS() {
 private api_getCSS() {
 	// return "<link rel=\"stylesheet\" href=\"${getResourcesUrl()}/dashboard.css\">"
 	
-	def css = "body {	font-size: 100%;	text-align:center;	font-family:Helvetica,arial,sans-serif;	margin:0 0 10px 0;	background-color: #000000;}header, nav, section, footer {	display: block;	text-align:center;}header {	margin: 0 0 0 0;	padding: 4px 0 4px 0;	width: 100%;		font-weight: bold;	font-size: 100%;	background-color:#808080;	color:#ffffff;}nav.top{	padding-top: 0;}nav.bottom{	padding: 4px 4px 4px 4px;}section {	padding: 10px 20px 40px 20px;}.command-results {	background-color: #d6e9c6;	margin: 0 20px 20px 20px;	padding: 10px 20px 10px 20px;	border-radius: 100px;}.command-results h1 {	margin: 0 0 0 0;}.command-results ul {	list-style: none;}.command-results li {	line-height: 1.5;	font-size: 120%;}.dashboard-url {	display:block;	width:100%;	font-size: 80%;}.device-id-none{	background-color: #d6e9c6 !important;}.refresh {	background-image: url('refresh.png');}.acceleration-active {	background-image: url('acceleration-active.png');}.acceleration-inactive{	background-image: url('acceleration-inactive.png');}.alarm, .alarm-both {	background-image: url('alarm-both.png');}.alarm-siren {	background-image: url('alarm-siren.png');}.alarm-strobe {	background-image: url('alarm-strobe.png');}.alarm-off {	background-image: url('alarm-off.png');}.battery, .normal-battery {	background-image: url('normal-battery.png');}.normal-75-battery {	background-image: url('normal-75-battery.png');}.normal-50-battery {	background-image: url('normal-50-battery.png');}.normal-25-battery {	background-image: url('normal-25-battery.png');}.low-battery {	background-image: url('low-battery.png');}.open {	background-image: url('open.png');}.contactSensor, .closed {	background-image: url('closed.png');}.light, .light-on {	background-image: url('light-on.png');}.light-off {	background-image: url('light-off.png');}.lock, .locked{	background-image: url('locked.png');}.unlocked {	background-image: url('unlocked.png');}.motionSensor, .motion {	background-image: url('motion.png');}.no-motion {	background-image: url('no-motion.png');}.presenceSensor, .present {	background-image: url('present.png');}.not-present {	background-image: url('not-present.png');}.smokeDetector, .smoke-detected {	background-image: url('smoke-detected.png');}.smoke-clear {	background-image: url('smoke-clear.png');}.switch, .switch-on {	background-image: url('switch-on.png');}.switch-off {	background-image: url('switch-off.png');}.temperatureMeasurement, .normal-temp {	background-image: url('normal-temp.png');}.low-temp {	background-image: url('low-temp.png');}.high-temp {	background-image: url('high-temp.png');}.waterSensor, .dry {	background-image: url('dry.png');}.wet {	background-image: url('wet.png');}.ok {	background-image: url('ok.png');}.warning {	background-image: url('warning.png');}.device-item {	width: 200px;	display: inline-block;	background-color: #ffffff;	margin: 2px 2px 2px 2px;	padding: 4px 4px 4px 4px;	border-radius: 5px;}.item-image-text {	position: relative;	height: 75px;	width:100%;	display: table;}.item-image {	display: table-cell;	position: relative;	width: 35%;	border: 1px solid #cccccc;	border-radius: 5px;	background-repeat:no-repeat;	background-size:auto 70%;	background-position: center bottom;}.item-status {	width: 100%;	font-size:75%;	display:inline-block;}.item-text {	display: table-cell;	width: 65%;	position: relative;	vertical-align: middle;}a.item-text {	color:#000000;}.item-text.wait, .menu-item a.wait{	color:#ffffff;	background-image:url('wait.gif');	background-repeat:no-repeat;	background-position: center bottom;}.item-text.wait{	background-size:auto 100%;}.label {	display:inline-block;	vertical-align: middle;	line-height:1.4;	font-weight: bold;	padding-left:4px;}.menu-item {	display: inline-block;	background-color:#808080;	padding:4px 4px 4px 4px;	border:1px solid #000000;	border-radius: 5px;	font-weight:bold;}.menu-item .item-image{	display:table-cell;	background-size:auto 45%;	height:50px;	width:75px;	border:0;	border-radius:0;}.menu-item .item-image.switch,.menu-item .item-image.light,.menu-item .item-image.battery,.menu-item .item-image.alarm,.menu-item .item-image.refresh {	background-size:auto 60%;}.menu-item a, .menu-item a:link, .menu-item a:hover, .menu-item a:active,.menu-item a:visited {	color: #ffffff;		text-decoration:none;}.menu-item:hover, .menu-item:hover a, .menu-item a:hover { 	background-color:#ffffff;	color:#000000 !important;}.menu-item span {	width: 100%;	font-size:75%;	display:inline-block;}@media (max-width: 639px){	.device-item {		width:125px;	}	.item-image-text {		height: 65px;	}	.item-image {		background-size: auto 60%;	}	.item-text .label {		font-size: 80%;		line-height: 1.2;	}}"
+	def css = "body {	font-size: 100%;	text-align:center;	font-family:Helvetica,arial,sans-serif;	margin:0 0 10px 0;	background-color: #000000;}header, nav, section, footer {	display: block;	text-align:center;}header {	margin: 0 0 0 0;	padding: 4px 0 4px 0;	width: 100%;		font-weight: bold;	font-size: 100%;	background-color:#808080;	color:#ffffff;}nav.top{	padding-top: 0;}nav.bottom{	padding: 4px 4px 4px 4px;}section {	padding: 10px 20px 40px 20px;}.command-results {	background-color: #d6e9c6;	margin: 0 20px 20px 20px;	padding: 10px 20px 10px 20px;	border-radius: 100px;}.command-results h1 {	margin: 0 0 0 0;}.command-results ul {	list-style: none;}.command-results li {	line-height: 1.5;	font-size: 120%;}.dashboard-url {	display:block;	width:100%;	font-size: 80%;}.device-id-none{	background-color: #d6e9c6 !important;}.refresh {	background-image: url('refresh.png');}.acceleration-active {	background-image: url('acceleration-active.png');}.acceleration-inactive{	background-image: url('acceleration-inactive.png');}.alarm, .alarm-both {	background-image: url('alarm-both.png');}.alarm-siren {	background-image: url('alarm-siren.png');}.alarm-strobe {	background-image: url('alarm-strobe.png');}.alarm-off {	background-image: url('alarm-off.png');}.battery, .normal-battery {	background-image: url('normal-battery.png');}.normal-75-battery {	background-image: url('normal-75-battery.png');}.normal-50-battery {	background-image: url('normal-50-battery.png');}.normal-25-battery {	background-image: url('normal-25-battery.png');}.low-battery {	background-image: url('low-battery.png');}.open {	background-image: url('open.png');}.contactSensor, .closed {	background-image: url('closed.png');}.light, .light-on {	background-image: url('light-on.png');}.light-off {	background-image: url('light-off.png');}.lock, .locked{	background-image: url('locked.png');}.unlocked {	background-image: url('unlocked.png');}.motionSensor, .motion {	background-image: url('motion.png');}.no-motion {	background-image: url('no-motion.png');}.presenceSensor, .present {	background-image: url('present.png');}.not-present {	background-image: url('not-present.png');}.smokeDetector, .smoke-detected {	background-image: url('smoke-detected.png');}.smoke-clear {	background-image: url('smoke-clear.png');}.switch, .switch-on {	background-image: url('switch-on.png');}.switch-off {	background-image: url('switch-off.png');}.temperatureMeasurement, .normal-temp {	background-image: url('normal-temp.png');}.low-temp {	background-image: url('low-temp.png');}.high-temp {	background-image: url('high-temp.png');}.waterSensor, .dry {	background-image: url('dry.png');}.wet {	background-image: url('wet.png');}.ok {	background-image: url('ok.png');}.warning {	background-image: url('warning.png');}.device-item {	width: 200px;	display: inline-block;	background-color: #ffffff;	margin: 2px 2px 2px 2px;	padding: 4px 4px 4px 4px;	border-radius: 5px;}.item-image-text {	position: relative;	height: 75px;	width:100%;	display: table;}.item-image {	display: table-cell;	position: relative;	width: 35%;	border: 1px solid #cccccc;	border-radius: 5px;	background-repeat:no-repeat;	background-size:auto 70%;	background-position: center bottom;}.item-status {	width: 100%;	font-size:75%;	display:inline-block;}.item-text {	display: table-cell;	width: 65%;	position: relative;	vertical-align: middle;}a.item-text {	color:#000000;}.item-text.wait, .menu-item a.wait{	color:#ffffff;	background-image:url('wait.gif');	background-repeat:no-repeat;	background-position: center bottom;}.item-text.wait{	background-size:auto 100%;}.label {	display:inline-block;	vertical-align: middle;	line-height:1.4;	font-weight: bold;	padding-left:4px;}.menu-item {	display: inline-block;	background-color:#808080;	padding:4px 4px 4px 4px;	border:1px solid #000000;	border-radius: 5px;	font-weight:bold;}.menu-item .item-image{	display:table-cell;	background-size:auto 45%; background-position: bottom center;	height:50px;	width:75px;	border:0;	border-radius:0;}.menu-item .item-image.switch,.menu-item .item-image.light,.menu-item .item-image.battery,.menu-item .item-image.alarm,.menu-item .item-image.refresh {	background-size:auto 60%;}.menu-item a, .menu-item a:link, .menu-item a:hover, .menu-item a:active,.menu-item a:visited {	color: #ffffff;		text-decoration:none;}.menu-item:hover, .menu-item:hover a, .menu-item a:hover { 	background-color:#ffffff;	color:#000000 !important;}.menu-item span {	width: 100%;	font-size:55%;	display:inline-block;}@media (max-width: 639px){	.device-item {		width:125px;	}	.item-image-text {		height: 65px;	}	.item-image {		background-size: auto 60%;	}	.item-text .label {		font-size: 80%;		line-height: 1.2;	}}"
 	
 	css = css.replace("url('", "url('${getResourcesUrl()}/")
 	css += api_getLayoutCSS()

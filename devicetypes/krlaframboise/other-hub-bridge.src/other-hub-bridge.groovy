@@ -1,13 +1,13 @@
 /**
- *  Other Hub Bridge 0.1 (ALPHA)
+ *  Other Hub Bridge 0.1 (BETA)
  *
  *  Author: 
  *    Kevin LaFramboise (krlaframboise)
  *
  *  Changelog:
  *
- *    0.1 (09/02/2017)
- *			- Alpha Relase
+ *    0.1. (09/05/2017)
+ *			- Beta Relase
  *
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -19,27 +19,31 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  */
+ 
 metadata {
 	definition (name: "Other Hub Bridge", namespace: "krlaframboise", author: "Kevin LaFramboise") {
-		capability "Sensor"
+		capability "Bridge"
 		capability "Refresh"
+		capability "Health Check"
 
+		attribute "lastCheckin", "string"
 		attribute "status", "string"
+		attribute "progress", "string"
 		attribute "refreshed", "string"
-		attribute "deviceList", "string"		
-		attribute "deviceSummary", "string"
+		
+		command "childOn"
+		command "childOff"
+		command "childRefresh"
+		command "childEvent"
 	}
 
 	preferences {
-		input "otherHubIP", "string",
-			title: "Other Hub IP:\n(Example: 192.168.0.0)",
-			required: true		
-		input "otherHubPort", "string",
-			title: "Other Hub Port:\n(Example: 8080)",
-			required: true
+		input "excludedDeviceIds", "string",
+			title: "Excluded Device Ids:\n(example: 32,25,43)", 
+			required: false
 		input "refreshInterval", "enum",
 			title: "Refresh Interval:",
-			defaultValue: refreshIntervalSetting,
+			defaultValue: "Disabled",
 			required: false,
 			displayDuringSetup: true,
 			options: refreshIntervalOptions.collect { it.name }
@@ -48,137 +52,234 @@ metadata {
 			defaultValue: true, 
 			displayDuringSetup: true, 
 			required: false
+		input "infoLogging", "bool", 
+			title: "Enable Info logging?", 
+			defaultValue: true, 
+			displayDuringSetup: true, 
+			required: false		
+		input "debugLogging", "bool", 
+			title: "Enable debug logging?", 
+			defaultValue: true, 
+			displayDuringSetup: true, 
+			required: false
+		input "traceLogging", "bool", 
+			title: "Enable trace logging?", 
+			defaultValue: true, 
+			displayDuringSetup: true, 
+			required: false
 	}
 
-	tiles() {     	
-		standardTile("status", "device.status", height:1, width:1, key: "PRIMARY_CONTROL") {
+	tiles (scale: 2) {     	
+		standardTile("status", "device.status", height:2, width:2, key: "PRIMARY_CONTROL") {
 			state "default", label:'${currentValue}', icon: "st.Lighting.light99-hue"
 		}
-		standardTile("refreshed", "device.refreshed", decoration: "flat", height:1, width:1) {
+		standardTile("refreshed", "device.refreshed", decoration: "flat", height:2, width:2) {
 			state "default", label:'Refreshed \n ${currentValue}'
 		}
-		standardTile("refresh", "device.refresh", height:1, width:1) {
+		standardTile("refresh", "device.refresh", height:2, width:2) {
 			state "default", label:'Refresh', action:"refresh.refresh", icon:"st.secondary.refresh-icon"
 		}
-		standardTile("deviceSummary", "device.deviceSummary", decoration: "flat", height:3, width:3) {
+		standardTile("progress", "device.progress", decoration: "flat", height:2, width:6) {
 			state "default", label:'${currentValue}'
 		}
-
-		main "status"
-		details(["status", "refreshed", "refresh", "deviceSummary"])
+		childDeviceTiles("deviceList")
 	}
+}
+
+def installed() {
+	logDebug "installed()..."
+}
+
+def uninstalled() {
+	logTrace "uninstalled()..."
 }
 
 def updated() {
 	if (!isDuplicateCommand(state.lastUpdated, 2000)) {
 		state.lastUpdated = new Date().time
 		logDebug "updated()..."
+		unschedule()
 		initialize()
 	}
 }
 
 private initialize() {
-	def dni = otherHubDeviceNetworkId
-	if (dni != ":" && device.deviceNetworkId != dni) {
-		log.warn "Attempting to change the Device Network Id from ${device.deviceNetworkId} to ${dni}, but you might have to make this change manually in the IDE."
-		device.deviceNetworkId = "$dni"		
-	}
-	else if (!state.deviceList) {
-		runIn(2, refresh)
+	if (state.retries == null) {
+		state.retries = 0
 	}
 	
-	unschedule()
-	
-	if (dni != ":") {
-		switch (refreshIntervalSettingMinutes) {
-			case 0:
-				// Auto Refresh Disabled
-				break
-			case 5:
-				runEvery5Minutes(autoRefresh)
-				break
-			case 10:
-				runEvery10Minutes(autoRefresh)
-				break
-			case 15:
-				runEvery15Minutes(autoRefresh)
-				break
-			case 30:
-				runEvery30Minutes(autoRefresh)
-				break
-			case [60, 120]:
-				runEvery1Hour(autoRefresh)
-				break
-			default:
-				runEvery3Hours(autoRefresh)			
+	initializeHealthCheck()
+
+	switch (refreshIntervalSettingMinutes) {
+		case 0:
+			// Auto Refresh Disabled
+			break
+		case 5:
+			runEvery5Minutes(refresh)
+			break
+		case 10:
+			runEvery10Minutes(refresh)
+			break
+		case 15:
+			runEvery15Minutes(refresh)
+			break
+		case 30:
+			runEvery30Minutes(refresh)
+			break
+		case [60, 120]:
+			runEvery1Hour(refresh)
+			break
+		default:
+			runEvery3Hours(refresh)			
+	}
+}
+
+private initializeHealthCheck() {
+	if (refreshIntervalSettingMinutes || state.checkInterval) {
+		def checkInterval = (24 * 60 * 60) // default 1 day
+		if (refreshIntervalSettingMinutes) {
+			checkInterval = ((refreshIntervalSettingMinutes * 60) + (5 * 60))
+		}
+		if (checkInterval != state.checkInterval) {
+			state.checkInterval = checkInterval
+			
+			sendEvent(name: "checkInterval", value: checkInterval, displayed: false, data: [protocol: "LAN", hubHardwareId: device.hub.hardwareID])
 		}
 	}
+}
+
+void ping() {
+	logDebug "ping()..."
+	sendRequests(["/installedapp/list/data"])
+}
+
+void childOn(deviceId) {
+	logTrace "childOn(${deviceId})..."
+	sendRunAction(deviceId, "switch.on")	
+}
+
+void childOff(deviceId) {
+	logTrace "childOff(${deviceId})..."
+	sendRunAction(deviceId, "switch.off")	
+}
+
+private sendRunAction(deviceId, command) {
+	// logTrace "${method} ${paths}"	
+	
+	def child = findChildByDeviceId(deviceId)
+	if (child) {
+				
+		def msg = "Sending command ${command} to ${child.displayName}"				
+		logInfo "$msg"
+		sendMainEvent("progress", msg)
+	
+		sendHubCommand(new physicalgraph.device.HubAction(
+			method: "POST",
+			path: "/device/runaction",
+			headers: ["HOST": "${otherHubAddress}", "Content-Type": "application/json"],
+			body: [deviceId: "${deviceId}", action: "${command}", args: []]
+		))
+	}
 	else {
-		log.warn "Auto Refresh Disabled because the Other Hub Settings are incomplete or invalid."
+		log.warn "Unable to send command ${command} for Device ${deviceId}"
 	}
 }
 
-def autoRefresh() {
-	logDebug "autoRefresh()..."
-	// def minimumRefreshInterval = (refreshIntervalSettingMinutes * 60 * 1000)
-	
-	// if(!state.lastRefresh || ((new Date().time - state.lastRefresh) >= minimumRefreshInterval)) {
-		refresh()
-	// }
+void childEvent(deviceId, name, value) {
+	logTrace "childEvent($deviceId, $name, $value)"
+	def child = findChildByDeviceId(deviceId)
+	if (child) {
+		def slurper = new groovy.json.JsonSlurper()
+		def data = child.currentOtherHubData ? slurper.parseText(child.currentOtherHubData) : [attrs:[:], caps:[:]]
+		
+		data.attrs."$name" = value
+		
+		def now = new Date()
+		data.activity = now		
+		
+		
+		sendChildDataEvents(child, data)
+	}
+	else {
+		log.warn "Device ${deviceId} not found"
+	}
 }
 
-def refresh() {
+void childRefresh(deviceId) {
+	state.pendingAction = true
+	sendRequests([getDevicePath(deviceId)])
+}
+
+private findChildByDeviceId(deviceId) {
+	return childDevices?.find { "${it.currentDeviceId}" == "$deviceId" }
+}
+
+void refresh() {
   logTrace "refresh()..."
-	if (!state.updating || state.skippedRefresh >= 3) {
-		sendEvent(name: "status", value: "refreshing", displayed: false, isStateChange: true)
+	if (!state.refreshing || state.skippedRefresh >= 3) {
 		logDebug "Requesting Device List"
-		state.skippedRefresh = 0
-		state.updating = false		
+		
+		state.skippedRefresh = 0		
+		state.lastRefresh = new Date().time
+				
+		sendMainEvent("status", "Refreshing")		
+		sendMainEvent("progress", "Requesting Device List")
+		
 		sendRequests(["/device/list/data"])
 	}
 	else {
 		logDebug "Refresh already in progress"
-		state.skippedRefresh = (state.skippedRefresh != null ? state.skippedRefresh : 0) + 1
-	}		
-	return []
+		state.skippedRefresh = (state.skippedRefresh ?: 0) + 1
+	}
 }
 
-def refreshDevices() {
-	def paths = unrefreshedDevicePaths	
-	if (!paths) {
-		logDebug "Refreshing All Devices"
-		state.lastRefresh = new Date().time
-		paths = unrefreshedDevicePaths
-	}	
-	else {
-		logDebug "Refreshing Unrefreshed Devices"
-	}
-	sendRequests(paths)
+private scheduleFinishRefresh() {
+	runIn(30, finishRefresh)
+}
+
+void refreshDevices() {
+	sendRequests(unrefreshedDevicePaths)	
 }
 
 private getUnrefreshedDevicePaths() {
 	def paths = []
-	state.deviceList?.findAll { it.refreshedAt != state.lastRefresh }?.each {		
-		paths << "/device/ui/data/${it.id}"
-	}	
+
+	state.deviceList?.each { dev ->
+		if (!childDevices?.find { "${it.currentDeviceId}" == "${dev.id}" && "${it?.currentLastRefresh}" == "${state.lastRefresh}" }) {
+			paths << getDevicePath("${dev.id}")
+		}
+	}
+	
 	return paths
 }
 
-private sendRequests(paths, method="GET") {
+private getDevicePath(deviceId) {
+	return "/device/ui/data/${deviceId}"
+}
+
+private void sendRequests(paths) {
 	// logTrace "${method} ${paths}"
-	def cmds = []
+	def hostAddress = otherHubAddress
+	if (hostAddress) {
 	
-	paths.each {
-		cmds << new physicalgraph.device.HubAction(
-			method: "$method",
-			path: "$it",
-			headers: ["HOST": otherHubAddress],
-			query: [
-				callback: hubAddress
-			]
-		)
+		def cmds = []
+		paths.each {
+			cmds << new physicalgraph.device.HubAction(
+				method: "GET",
+				path: "$it",
+				headers: ["HOST": "$hostAddress"],
+				query: [
+					callback: hubAddress
+				]
+			)			
+		}
+		
+		scheduleFinishRefresh()
+		sendHubCommand(cmds, 0)
 	}
-	sendHubCommand(cmds, 5000)
+	else {
+		log.warn "Invalid otherHubAddress: ${otherHubAddress}"
+	}
 }
 
 private getHubAddress() {
@@ -186,92 +287,243 @@ private getHubAddress() {
 }
 
 private getOtherHubAddress() {
-	return "${otherHubIPSetting}:${otherHubPortSetting}"
+	def ip = getDataValue("ip")
+	def port = getDataValue("port")
+	return (ip != null && port != null) ? "${convertHexToIP(ip)}:${convertHexToInt(port)}" : ""
 }
 
-def parse(String description) {
-	// logTrace "parse: ${description}"
-
-	def msg = parseLanMessage(description)
-	if (isDeviceDetailsData(msg?.data)) {
-		storeDevice(msg?.data)
-		runIn(15, finishStoringDevices, [overwrite: true])
+void sync(ip, port) {
+	logTrace "sync($ip, $port)..."
+	def existingIp = getDataValue("ip")
+	def existingPort = getDataValue("port")
+	if (ip && ip != existingIp) {
+		updateDataValue("ip", ip)
 	}
-	else if (msg?.data) {
-		storeDeviceList(msg?.data)
-		if (!state.updating) {
-			state.updating = true
-			runIn(5, refreshDevices)
-		}
+	if (port && port != existingPort) {
+		updateDataValue("port", port)
+	}
+}
+
+
+def parse(String description) {
+	def msg = parseLanMessage(description)
+	// logTrace "parsedLanMessage: $msg"
+	
+	sendLastCheckinEvent()
+	
+	if (isDeviceDetailsData(msg?.data)) {
+		updateChildDeviceDetails(msg?.data)
+	}
+	else if (isSmartAppListData(msg?.data)) {	
+		logInfo "${device.displayName} is Online" // Device Watch Pinged Device
+	}
+	else if (isDeviceListData(msg?.data)) {
+		updateChildDeviceList(msg?.data)
+		
+		logInfo "Refreshing ${state.deviceList?.size() ?: 0} Devices"
+		state.refreshing = true
+		refreshDevices()
 	}
 	return []
 }
 
-private isDeviceDetailsData(data) {
-	return "${data?.id}".isNumber()
+private sendLastCheckinEvent() {
+	if (!isDuplicateCommand(state.lastCheckinTime, 60000)) {
+		state.lastCheckinTime = new Date().time
+		sendMainEvent("lastCheckin", convertToLocalTimeString(new Date()))
+	}
 }
 
-private storeDeviceList(data) {
-	if (state.deviceList == null) {
-		state.deviceList = []
-	}
-	
-	def ids = state.deviceList.collect { "${it.id}" }
+private isDeviceDetailsData(data) {
+	return fieldInData("currentStates", data)
+}
+
+private isDeviceListData(data) {
+	return fieldInData("lastActivityTime", data)
+}
+
+private isSmartAppListData(data) {
+	return fieldInData("appTypeId", data)
+}
+
+private fieldInData(field, data) {
+	return (data?.toString()?.contains("${field}:") == true)
+}
+
+private updateChildDeviceList(data) {
+	logTrace "updateChildDeviceList..."
+	def deviceList = []
 	
 	data?.each { dev ->
-		def desc = "[id:${dev.id}, displayName:${dev.name}, lastActivity:${dev.lastActivityTime}]"
-		
-		if (dev.name == "Device") {
-			logTrace "Ignoring Device: ${desc}"
+		if (dev.deviceTypeName != "Device" && !excludedDeviceIdsSetting?.find { "$it" == "${dev.id}"}) {
+			deviceList << [id: "${dev.id}", lastActivityTime: dev.lastActivityTime, name: "${dev.name}"]
 		}
-		else {
-			def item = state.deviceList.find { it.id == dev.id }
-			if (item) {
-				// logTrace "Updating Device: $desc"
-		
-				ids.remove(ids?.find { "$it" == "${dev.id}" })				
-				item.displayName = dev.name
-				item.lastActivity = dev.lastActivityTime
-			}
-			else {
-				// logTrace "Adding Device: ${desc}"
-				
-				state.deviceList << [id: dev.id, name: dev.name, lastActivity:dev.lastActivityTime]
-			}			
-		}		
 	}
 	
-	// Remove devices that no longer exist.
-	ids.each { id ->
-		logTrace "Removing Device Id: $id"
-		
-		state.deviceList.remove(state.deviceList.find { "${it.id}" == "$id" })
+	if (deviceList.size() > 0) {
+		childDevices?.each { child ->
+			if (!deviceList.find { "${it.id}" == "${child?.currentDeviceId}" }) {
+				logInfo "Deleting ${child.displayName}"
+				// deleteChildDevice(child.deviceNetworkId)
+			}
+		}
 	}
-	logDebug "Found ${data?.size() ?: 0} Devices"
+	
+	sendMainEvent("progress", "Refreshing ${deviceList.size()} Devices")
+	state.deviceList = deviceList
 }
 
-private storeDevice(data) {
-	logTrace "storeDevice: ${data?.name}"
-	def item = state.deviceList.find { it.id == data.id }
-	if (item) {
-		def attrValues = getAttributeValues(data)
-		item.deviceNetworkId = "OtherHub${data.deviceNetworkId}"
-		item.status = "Online"			
-		item.currentValues = attrValues
-		item.capabilities = getCapabilities(attrValues)
-		item.refreshedAt = state.lastRefresh		
+private updateChildDeviceDetails(data) {
+	// logTrace "updateChildDevice: ${data?.name}"
+	
+	def lastActivity = state.deviceList?.find { "${it.id}" == "${data.id}" }?.lastActivityTime
+	
+	def attrs = getAttributes(data)
+	def caps = getCapabilities(attrs)
+	
+	def child = childDevices?.find { "${it.currentDeviceId}" == "${data.id}" }
+	
+	if (!child) {
+		state.devicesAdded = true
+		if (childHasAttribute(attrs, "switch")) {
+			logTrace "Adding Switch: ${data.name}"
+			child = addNewChildDevice(data, "Other Hub Switch")
+		}
+		else if (childHasCapability(caps, "Motion Sensor")) {
+			logTrace "Adding Motion Sensor: ${data.name}"
+			child = addNewChildDevice(data, "Other Hub Motion Sensor")
+		}		
+		else if (childHasCapability(caps, "Contact Sensor")) {
+			logTrace "Adding Contact Sensor: ${data.name}"
+			child = addNewChildDevice(data, "Other Hub Contact Sensor")		
+		}		
+				
+		if (!child) {
+			logTrace "Adding Device: ${data.name}"
+			child = addNewChildDevice(data, "Other Hub Device")
+		}
+		
+		if (child) {		
+			sendChildEvent(child, "deviceId", "${data.id}")
+		}
 	}
 	else {
-		log.warn "Id ${data.id} not found in deviceList"
+		logTrace "Updating ${data.name}"
+	}
+	
+	sendChildEvent(child, "lastRefresh", state.lastRefresh)
+	
+	if (child) {
+		def otherHubData = [
+			id: child.deviceNetworkId, 
+			displayName: child.displayName, 
+			activity: lastActivity,
+			attrs: attrs,
+			caps: caps
+		]
+		
+		sendChildDataEvents(child, otherHubData)
 	}
 }
 
-private getAttributeValues(data) {
+private childHasAttribute(attrs, attr) {
+	return attrs?.find { k,v -> "$k" == "$attr" } ? true : false
+}
+
+private childHasCapability(caps, cap) {
+	return caps?.find { "$it" == "$cap" } ? true : false
+}
+
+private addNewChildDevice(data, deviceType) {
+	try {
+		return addChildDevice(
+			"krlaframboise",
+			"${deviceType}",
+			"${getChildDNI(data.id)}", 
+			null,
+			[
+				name: "OHB-${data.name}",
+				label: "OHB-${data.name}",				
+				// componentName: "OHB-Device${data.id}", 
+				// componentLabel: "${data.name}",
+				isComponent: false,
+				completedSetup: true
+			])
+	}
+	catch (e) {
+		if ("$e".contains("UnknownDeviceTypeException")) {
+			log.warn "Device Type Handler Not Installed: ${deviceType}"
+		}
+		else {
+			log.error "$e"
+		}
+	}
+}
+
+private sendChildDataEvents(child, data) {
+	if (data?.attrs) {
+		sendChildEvent(child, "status", getChildStatus(data.attrs))
+		
+		sendChildCapabilityEvent(child, "Switch", "switch", (data?.attrs?."switch"?.toLowerCase() ?: "off"))
+		
+		sendChildCapabilityEvent(child, "Motion Sensor", "motion", (data?.attrs?."motion"?.toLowerCase() ?: "inactive"))
+		
+		sendChildCapabilityEvent(child, "Contact Sensor", "contact", (data?.attrs?."contact"?.toLowerCase() ?: "closed"))
+	}
+	
+	if (data) {
+		sendChildEvent(child, "otherHubData", groovy.json.JsonOutput.toJson(data))
+	}
+}
+
+private sendChildCapabilityEvent(child, capName, attrName, value) {
+	if (child.hasCapability("${capName}")) {		
+		if (value) {
+	
+			def oldValue = child."current${attrName.capitalize()}"
+			if ("${oldValue}" != "$value") {
+			
+				child.sendEvent(name: "${attrName}", value: value, displayed: true, isStateChange: true)
+				
+			}
+		}
+	}
+}
+
+private getChildStatus(attrs) {
+	def attrStatuses = []
+	attrs?.each { k, v ->
+		def attrStatus = "$v"
+		switch("$k") {
+			case "battery":
+				attrStatus = "${attrStatus}%"
+				break
+			case "temperature":
+				attrStatus = "${attrStatus}°"
+				break
+		}
+		if (!attrStatuses.find { "$it" == "$attrStatus" }) {
+			attrStatuses << "$attrStatus"
+		}
+	}
+	return attrStatuses?.join("/") ?: ""
+}
+
+private sendChildEvent(child, name, value, displayed=false) {
+	// logTrace "sendChildEvent(${child}, ${name}, ${value}, ${displayed})"
+	child?.sendEvent(name: "$name", value: value, displayed: displayed)
+}
+
+private getChildDNI(deviceId) {
+	return "OHB-Device${deviceId}"
+}
+
+private getAttributes(data) {
 	def attrValues =[:]
 	supportedCapabilities.each { key, value ->
 		def attr = data.currentStates["${key}"]
 		if (attr) {
-			attrValues["${attr.name}"] = (attr.dataType == "NUMBER") ? attr.numberValue : attr.value
+			attrValues["${attr.name}"] = ("${attr.dataType}" == "NUMBER") ? attr.numberValue : attr.value
 		}
 	}
 	return attrValues
@@ -287,6 +539,11 @@ private getCapabilities(attrValues) {
 	}
 	return caps
 }
+
+private sendMainEvent(name, value, displayed=false) {
+	sendEvent(name: "$name", value: value, displayed: displayed)
+}
+
 
 private getSupportedCapabilities() {
 	[
@@ -311,50 +568,54 @@ private getSupportedCapabilities() {
 }
 
 
-def finishStoringDevices() {
-	def jsonVal = groovy.json.JsonOutput.toJson(state.deviceList)
+void finishRefresh() {
+	def skipped = unrefreshedDevicePaths?.size() ?: 0
 	
-	sendEvent(name:"deviceList", value: jsonVal, displayed: false, isStateChange: true)	
-	
-	sendEvent(name:"deviceSummary", value: deviceSummary, displayed: false, isStateChange: true)
+	if (state.refreshing && !state.devicesAdded && !state.pendingAction && skipped && state.retries <= 3) {
+		state.retries = (state.retries + 1)
 			
-	if (unrefreshedDevicePaths) {
-		if (!isDuplicateCommand(state.lastRefresh, (5 * 60 * 1000))) {
-			// It's within the minimum reporting interval so refresh the devices that were missed the previous run.
-			runIn(0, refreshDevices)
-		}
-		else {
-			sendRefreshedEvent()
-		}
+		// It's within the minimum reporting interval so refresh the devices that were missed the previous run.
+		def msg = "Refreshing ${skipped} Skipped Devices."
+		logInfo "$msg"
+		sendMainEvent("progress", "$msg")
+		runIn(3, refreshDevices)
+	}
+	else if (!state.refreshing && state.pendingAction) {
+		state.pendingAction = false		
+		sendRefreshedEvent("Device Refreshed")
 	}
 	else {
-		logDebug "All Devices Refreshed"
-		state.updating = false
-		sendEvent(name: "status", value: "Online", displayed: false, isStateChange: true)
-		sendRefreshedEvent()
+		def total = state.deviceList?.size() ?: 0
+		def refreshStatus = skipped ? "${total - skipped} of ${total}" : "All"
+	
+		state.refreshing = false
+		state.pendingAction = false
+		state.devicesAdded = false		
+		
+		sendRefreshedEvent("${refreshStatus} Devices Refreshed")
 	}	
 }
 
-private sendRefreshedEvent() {
+private sendRefreshedEvent(msg) {
+	logInfo "$msg"
+	state.retries = 0
 	def dt = state.lastRefresh ? new Date(state.lastRefresh) : new Date()
-	sendEvent(name: "refreshed", value:  convertToLocalTimeString(dt), displayed: false, isStateChange: true)
+	sendMainEvent("refreshed", convertToLocalTimeString(dt))
+	
+	sendMainEvent("status", "Online")
+	sendMainEvent("progress", "$msg")	
+	
+	runIn(5, clearProgress)
 }
 
-private getDeviceSummary() {
-	def lines = []
-	state.deviceList?.each {
-		lines << "${it.displayName}"
-	}
-	return lines ? lines.sort().join("\n") : ""
+def clearProgress() {
+	sendMainEvent("progress", "")
 }
+
 
 // Settings
-private getOtherHubIPSetting() {
-	return settings?.otherHubIP ?: ""
-}
-
-private getOtherHubPortSetting() {
-	return settings?.otherHubPort ?: ""
+private getExcludedDeviceIdsSetting() {
+	return settings?.excludedDeviceIds?.split(",")?.collect { it.trim() } ?: []
 }
 
 private getRefreshIntervalSettingMinutes() {
@@ -362,7 +623,7 @@ private getRefreshIntervalSettingMinutes() {
 }
 
 private getRefreshIntervalSetting() {
-	return settings?.refreshInterval ?: "5 Minutes"
+	return settings?.refreshInterval ?: "Disabled"
 }
 
 
@@ -385,7 +646,7 @@ private getRefreshIntervalOptions() {
 }
 
 private convertOptionSettingToInt(options, settingVal) {
-	return safeToInt(options?.find { "${settingVal}" == it.name }?.value, 0)
+	return safeToInt(options?.find { "${settingVal}" == "${it.name}" }?.value, 0)
 }
 
 private safeToInt(val, defaultVal=-1) {
@@ -402,26 +663,22 @@ private convertToLocalTimeString(dt) {
 	}	
 }
 
-private getOtherHubDeviceNetworkId() {
-	def portHex = convertToHex(otherHubPortSetting, "%04x")
-	return "${otherHubIPHex}:${portHex}"
+private String convertHexToIP(hex) {
+	[convertHexToInt(hex[0..1]), convertHexToInt(hex[2..3]), convertHexToInt(hex[4..5]), convertHexToInt(hex[6..7])].join(".")
 }
 
-private getOtherHubIPHex() {
-	return otherHubIPSetting?.tokenize( "." )?.collect { convertToHex(it, "%02x") }?.join()
-}
-
-private convertToHex(val, hexFormat) {
-	if ("$val".isInteger()) {
-		return "$val".format(hexFormat, "$val".toInteger())?.toUpperCase()
-	}
-	else {
-		return ""
-	}
+private Integer convertHexToInt(hex) {
+	Integer.parseInt(hex,16)
 }
 
 private isDuplicateCommand(lastExecuted, allowedMil) {
 	!lastExecuted ? false : (lastExecuted + allowedMil > new Date().time) 
+}
+
+private logInfo(msg) {
+	if (settings?.infoLogging != false) {
+		log.info msg
+	}
 }
 
 private logDebug(msg) {
@@ -431,5 +688,7 @@ private logDebug(msg) {
 }
 
 private logTrace(msg) {
-	log.trace "$msg"
+	if (settings?.traceLogging != false) {
+		log.trace "$msg"
+	}
 }
