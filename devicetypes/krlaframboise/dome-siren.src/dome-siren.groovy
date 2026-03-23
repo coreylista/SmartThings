@@ -1,14 +1,41 @@
 /**
- *  Dome Siren v1.2
+ * 
+ *  Dome Siren [OBSOLETE]
  *  (Model: DMS01)
+ *  
+ * THIS DEVICE HANDLER IS OBSOLETE
+ *  
+ * A new handler was written for this device, but if you decide to use it with an existing device then you MUST remove the device, delete this handler, install/publish the new handler, and add the device again.
+ *
+ * If you have more than one of these devices and you only want to use the new handler with one of them then you can keep this handler and the other devices installed, but you'll need to put // in front of lines 114 and 115 below to ensure the new handler gets assigned to the device when it's joined.
+ *
+ * Forum Topic for New Handler:
+ * https://community.smartthings.com/t/release-dome-siren-official-2-0/230204
+ *
+ *
+ * -----------------------------------------------------
  *
  *  Author: 
  *    Kevin LaFramboise (krlaframboise)
  *
- *  URL to documentation:  https://community.smartthings.com/t/release-dome-siren-official/75499?u=krlaframboise
+ *  OBSOLETE: URL to documentation:  https://community.smartthings.com/t/release-dome-siren-official/75499?u=krlaframboise
  *    
  *
  *  Changelog:
+ *
+ *    1.3.1 (09/13/2020)
+ *      - Replaced vid with ocfDeviceType which makes it fully supported in the new mobile app.
+ *      - Added support for selecting device as a dimmer and playing the sound based on the levels 1-10.
+ *      - Added "Switch On Action" setting that determines what happens when the "on" command is executed.  This has to be set to "Do Nothing" if you want to be able to play chimes by using the device as a dimmer.
+ *
+ *    1.2.3 (08/15/2018)
+ *    	- Added support for new mobile app.
+ *
+ *    1.2.2 (12/07/2017)
+ *    	- Fixed beeping during delayed alarm because SmartThings broke something during a recent update.
+ *
+ *    1.2.1 (12/02/2017)
+ *    	- Fixed bug with siren play until depleted setting.
  *
  *    1.2 (10/12/2017)
  *    	- SmartThings broke the ability to set a state value to null which prevented the resetting of sirenStartTime.
@@ -49,7 +76,8 @@ metadata {
 	definition (
 		name: "Dome Siren", 
 		namespace: "krlaframboise", 
-		author: "Kevin LaFramboise"
+		author: "Kevin LaFramboise",
+		ocfDeviceType: "x.com.st.d.siren"
 	) {
 		capability "Actuator"
 		capability "Alarm"
@@ -61,6 +89,7 @@ metadata {
 		capability "Audio Notification"
 		capability "Music Player"
 		capability "Switch"
+		capability "Switch Level"	
 		capability "Health Check"
 		
 		attribute "lastCheckin", "string"
@@ -82,8 +111,7 @@ metadata {
 		command "siren1"
 		command "siren2"
 		
-		fingerprint deviceId: "0x1005", inClusters: "0x25, 0x59, 0x5A, 0x5E, 0x70, 0x71, 0x72, 0x73, 0x80, 0x85, 0x86, 0x87"
-		
+		fingerprint deviceId: "0x1005", inClusters: "0x25, 0x59, 0x5A, 0x5E, 0x70, 0x71, 0x72, 0x73, 0x80, 0x85, 0x86, 0x87"		
 		fingerprint mfr:"021F", prod:"0003", model:"0088"
 	}
 	
@@ -156,6 +184,11 @@ metadata {
 			required: false,
 			displayDuringSetup: true,
 			options: checkinIntervalOptions.collect { it.name }
+		input "switchOnAction", "enum",
+			title: "Switch On Action",
+			defaultValue: "on",
+			required: false,
+			options: switchOnActionOptions
 		input "debugOutput", "bool", 
 			title: "Enable debug logging?", 
 			defaultValue: true, 
@@ -280,6 +313,7 @@ def updated() {
 			}
 		}
 		else {
+			resetLevel()
 			// Skip first time updating because it calls the configure method while it's already running.
 			state.firstUpdate = false
 		}
@@ -355,7 +389,7 @@ def configure() {
 	configData.sort { it.paramNum }.each { 
 		cmds += updateConfigVal(it.paramNum, it.value, refreshAll)	
 	}
-			
+					
 	if (refreshAll) {
 		cmds << switchBinaryGetCmd()
 	}
@@ -451,15 +485,44 @@ def off() {
 	logDebug "Turning Off()"
 	state.pendingSiren = false
 	state.sirenStartTime = false
+	
+	if (settings?.switchOnAction != null && settings?.switchOnAction != "on") {
+		resetSwitch()
+	}
+	
 	return sirenToggleCmds(0x00)
 }
 
 // Commands that turn the device on.
-def play() { return on() }
-def on() {	
-	logDebug "Playing Default Chime"	
-	return both()
+def play() { 
+	return beep() 
 }
+
+
+def on() {	
+	logDebug "on()..."
+	
+	if (settings?.switchOnAction == null || settings?.switchOnAction == "on") {
+		return both()
+	}
+	else {
+		sendEvent(name: "switch", value:"on")
+		runIn(2, resetSwitch)
+		
+		def sound = safeToInt(settings?.switchOnAction, 0)
+		if (sound) {
+			return startChime(level)
+		}	
+		else {
+			log.warn "Ignoring 'on' command because the Switch On Action setting is set to 'Do Nothing'"
+		}
+	}	
+}
+
+def resetSwitch() {
+	sendEvent(name: "switch", value:"off")
+}
+
 
 // Plays beep sound specified in settings.
 def beep() {
@@ -468,7 +531,7 @@ def beep() {
 	if (state.pendingSiren) {	
 		return [
 			indicatorSetCmd(beepSound),
-			"delay 1000",
+			"delay 2500",
 			indicatorGetCmd()
 		]
 	}
@@ -476,6 +539,26 @@ def beep() {
 		return startChime(beepSound)
 	}
 }
+
+
+def setLevel(level, duration=null) {
+	if (level != device.currentValue("level")) {
+		sendEvent(name: "level", value: level, unit: "%")
+		runIn(3, resetLevel)
+		
+		logDebug "setLevel($level)..."
+		return startChime(level)
+	}
+	else {
+		logDebug "Ignoring duplicate setLevel($level)"
+		resetLevel()
+	}
+}
+
+def resetLevel() {
+	sendEvent(name: "level", value: 0, unit: "%")
+}
+
 
 // Plays the sound by name.
 def bell1() { playText("bell1") }
@@ -700,7 +783,7 @@ def zwaveEvent(physicalgraph.zwave.commands.indicatorv1.IndicatorReport cmd) {
 	if (state.pendingSiren) {
 		if (((state.sirenStartTime - beepDelayMS) > new Date().time) && (sirenDelayBeepSetting == "On")){
 			def result = []
-			result << "delay ${beepDelayMS}"
+			// result << "delay ${beepDelayMS}"
 			result += beep()
 			return sendResponse(result)
 		}
@@ -921,7 +1004,7 @@ private getChimeLEDSetting() {
 	return settings?.chimeLED ?: findDefaultOptionName(ledOptions)
 }
 private getChimeModeSetting() {
-	return 1 // Chime Mode should always be disabled.
+	return 1 // Chime Mode should always be disabled. (2: secondary)
 }
 private getCheckinIntervalSettingMinutes() {
 	return convertOptionSettingToInt(checkinIntervalOptions, checkinIntervalSetting) ?: 720
@@ -946,6 +1029,20 @@ private validateSound(sound, defaultVal) {
 	}
 	return val
 }
+
+
+private getSwitchOnActionOptions() {
+	def options = [
+		"0":"Do Nothing",
+		"on": "Turn On Siren [DEFAULT]"	
+	]
+	
+	(1..10).each {
+		options["${it}"] = "Play Sound #${it}"
+	}	
+	return options
+}
+
 
 private getSoundMessages() {
 	[
@@ -1034,7 +1131,7 @@ private getSirenLengthOptions() {
 		[name: "30 Seconds", value: 1],
 		[name: formatDefaultOptionName("1 Minute"), value: 2],
 		[name: "5 Minutes", value: 3],
-		[name: "${noLengthMsg}", value: 4] // config value is 255
+		[name: "${noLengthMsg}", value: 255] // old value 4???
 	]
 }
 
